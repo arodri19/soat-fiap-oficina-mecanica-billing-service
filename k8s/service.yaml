@@ -1,0 +1,35 @@
+# Público: webhook do Mercado Pago (POST /api/webhooks/mercadopago) e consultas.
+apiVersion: v1
+kind: Service
+metadata:
+  name: billing-service-public
+  namespace: oficina-mecanica
+  labels:
+    app: billing-service
+    app.kubernetes.io/part-of: oficina-mecanica
+spec:
+  type: LoadBalancer
+  selector:
+    app: billing-service
+  ports:
+    - name: http
+      port: 80
+      targetPort: 4100
+---
+# Interno: REST síncrono do os-service (http://billing-service.oficina-mecanica.svc.cluster.local)
+apiVersion: v1
+kind: Service
+metadata:
+  name: billing-service
+  namespace: oficina-mecanica
+  labels:
+    app: billing-service
+    app.kubernetes.io/part-of: oficina-mecanica
+spec:
+  type: ClusterIP
+  selector:
+    app: billing-service
+  ports:
+    - name: http
+      port: 80
+      targetPort: 4100

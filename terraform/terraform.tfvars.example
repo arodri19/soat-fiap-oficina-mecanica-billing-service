@@ -1,0 +1,4 @@
+project_name    = "oficina-mecanica"
+aws_region      = "us-east-1"
+environment     = "dev"
+tf_state_bucket = "<bucket-dos-states-terraform>"

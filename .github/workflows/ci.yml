@@ -1,0 +1,96 @@
+name: CI — Build, Testes e Qualidade
+
+# Todo push de branch de trabalho e todo PR para main/homologacao (branches
+# protegidas: merge exige este workflow verde). Reutilizado pelo CD (workflow_call).
+on:
+  push:
+    branches-ignore: [main, homologacao]
+  pull_request:
+    branches: [main, homologacao]
+  workflow_call:
+    secrets:
+      SONAR_TOKEN:
+        required: false
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  test:
+    name: Testes + Cobertura + SonarQube
+    runs-on: ubuntu-latest
+    env:
+      JWT_SECRET: ci-secret-placeholder
+      NEW_RELIC_ENABLED: 'false'
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Instalar dependências
+        run: npm ci
+
+      # Unitários + BDD (jest-cucumber). coverageThreshold falha abaixo de 80%.
+      - name: Testes com cobertura (mínimo 80%)
+        run: npm run test:ci
+
+      - name: Resumo de cobertura
+        if: always()
+        run: |
+          if [ -f coverage/coverage-summary.json ]; then
+            node -e "
+              const s = require('./coverage/coverage-summary.json').total;
+              console.log('### Cobertura de testes — billing-service');
+              console.log('| Métrica | % |');
+              console.log('|---------|---|');
+              ['lines','statements','functions','branches'].forEach(k => console.log('| ' + k + ' | ' + s[k].pct + '% |'));
+            " >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Publicar relatório de cobertura
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: coverage-billing-service
+          path: coverage/
+          retention-days: 14
+
+      - name: Verificar configuração do SonarQube
+        id: sonar
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          if [ -n "$SONAR_TOKEN" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::SONAR_TOKEN não configurado — análise SonarQube ignorada."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Análise SonarQube + Quality Gate
+        if: steps.sonar.outputs.enabled == 'true'
+        uses: SonarSource/sonarqube-scan-action@v5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL || 'https://sonarcloud.io' }}
+        with:
+          args: >
+            -Dsonar.organization=${{ vars.SONAR_ORGANIZATION || 'arodri19' }}
+            -Dsonar.qualitygate.wait=true
+
+  docker-build:
+    name: Build da imagem Docker
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v7.0.1
+      - name: Build (sem push) — valida o Dockerfile
+        run: docker build -t oficina-billing-service:ci .

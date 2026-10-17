@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: billing-service
+  namespace: oficina-mecanica
+  labels:
+    app: billing-service
+    app.kubernetes.io/name: billing-service
+    app.kubernetes.io/part-of: oficina-mecanica
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: billing-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: billing-service
+        app.kubernetes.io/part-of: oficina-mecanica
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: billing-service
+          image: arodri19/oficina-billing-service:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 4100
+              name: http
+          envFrom:
+            - configMapRef:
+                name: billing-service-config
+            - secretRef:
+                name: billing-service-secrets
+          readinessProbe:
+            httpGet: { path: /health, port: 4100 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: 4100 }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests: { cpu: "50m", memory: "96Mi" }
+            limits: { cpu: "250m", memory: "192Mi" }
