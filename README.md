@@ -69,11 +69,26 @@ Toda escrita envia `X-Idempotency-Key`. Erros 429/5xx/rede devolvem o comando à
 pelo SQS); 4xx viram resposta de falha para a saga. Pagamento aprovado de um orçamento já
 cancelado (link antigo pago após recusa/timeout) é **estornado automaticamente**.
 
-**Configuração**: `PAYMENT_GATEWAY=mercadopago`, `MERCADOPAGO_ACCESS_TOKEN` (credencial de
-teste `TEST-...` em Suas integrações), `MERCADOPAGO_WEBHOOK_SECRET` (assinatura secreta do
-webhook) e `PUBLIC_BASE_URL` (URL **https** pública do billing — o Mercado Pago só notifica
-https; em dev use um túnel, na AWS a rota da API Gateway). Sem token, o serviço usa o gateway
-**fake** e o pagamento é simulado em `POST /api/payments/order/:orderId/simulate` (`{"status":"approved"|"rejected"}`).
+**Configuração**: `MERCADOPAGO_ACCESS_TOKEN` (credencial de teste `TEST-...` em Suas
+integrações) liga o gateway real; sem ele o serviço usa o gateway **fake** e o pagamento é
+simulado em `POST /api/payments/order/:orderId/simulate` (`{"status":"approved"|"rejected"}`).
+`MERCADOPAGO_WEBHOOK_SECRET` (assinatura secreta do painel) é opcional: com ele, notificações
+sem `x-signature` válida são recusadas; sem ele, a proteção é a reconsulta obrigatória do
+pagamento na API do Mercado Pago (o corpo da notificação nunca é usado como verdade).
+
+**Webhook https automático na AWS**: o Mercado Pago só notifica URLs https e o billing roda
+atrás de um LoadBalancer http. O CD resolve isso sozinho, numa única execução:
+
+1. aplica o Service e espera o hostname do LoadBalancer;
+2. descobre a API Gateway do repositório `serverless` pelo nome (`oficina-mecanica-<env>-api`);
+3. o Terraform deste repositório ([`terraform/webhook.tf`](terraform/webhook.tf)) cria nela a
+   rota `POST /api/webhooks/mercadopago` → LoadBalancer;
+4. a URL https da API Gateway vira `PUBLIC_BASE_URL` e entra como `notification_url` em cada
+   preferência — não é preciso cadastrar nada no painel do Mercado Pago.
+
+Se a API Gateway ainda não existir, o deploy segue com aviso (sem webhook https) e a rota é
+criada na próxima execução. `BILLING_PUBLIC_URL` (variable do GitHub) só serve para forçar
+outra URL.
 
 ## API (Swagger em `/api-docs`)
 
@@ -117,7 +132,8 @@ Test Suites: 7 passed · Tests: 93 passed
 
 - [`ci.yml`](.github/workflows/ci.yml): testes + cobertura ≥ 80% + **SonarQube Quality Gate** + build da imagem (PRs e branches de trabalho)
 - [`cd.yml`](.github/workflows/cd.yml): a cada merge em `homologacao`/`main` → CI → imagem no Docker Hub →
-  Terraform (tabela DynamoDB, fila `*-billing-commands` + DLQ, IAM de menor privilégio) → deploy no EKS + smoke test
+  Terraform (tabela DynamoDB, fila `*-billing-commands` + DLQ, IAM de menor privilégio, rota https do webhook na
+  API Gateway) → deploy no EKS + smoke test
   (pulado com aviso se o cluster estiver desligado)
 - [`k8s/`](k8s): ConfigMap, Deployment, Service público (webhook) + interno (ClusterIP), HPA
 - Branches `main`/`homologacao` protegidas (PR + checks obrigatórios); desenvolvimento na `fase04`

@@ -31,3 +31,20 @@ variable "max_receive_count" {
   type        = number
   default     = 5
 }
+
+# ── Webhook do Mercado Pago (https via API Gateway do repositório serverless) ──
+# Preenchidas automaticamente pelo CD: o id da API Gateway é descoberto pelo nome
+# (<projeto>-<ambiente>-api) e a upstream é o hostname do LoadBalancer do billing.
+# Vazias (API Gateway não implantada, ou terraform local) = rota não criada.
+
+variable "api_gateway_id" {
+  description = "ID da API Gateway (HTTP API) do repositório serverless"
+  type        = string
+  default     = ""
+}
+
+variable "webhook_upstream_url" {
+  description = "URL http do LoadBalancer do billing-service (ex.: http://a1b2.us-east-1.elb.amazonaws.com)"
+  type        = string
+  default     = ""
+}

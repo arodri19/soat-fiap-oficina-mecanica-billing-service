@@ -7,8 +7,9 @@ name: CD — Deploy automatizado no Kubernetes (EKS)
 # Secrets: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
 #          JWT_SECRET, NEW_RELIC_LICENSE_KEY, MERCADOPAGO_ACCESS_TOKEN,
 #          MERCADOPAGO_WEBHOOK_SECRET, SONAR_TOKEN
-# Variables: AWS_REGION, TF_STATE_BUCKET, DEPLOY_ENVIRONMENT, BILLING_PUBLIC_URL
-#            (URL https pública do billing para o webhook — ex.: rota da API Gateway)
+# Variables: AWS_REGION, TF_STATE_BUCKET, DEPLOY_ENVIRONMENT
+#            BILLING_PUBLIC_URL (opcional — só para forçar outra URL pública; por padrão
+#            o CD cria a rota https na API Gateway e usa a URL dela automaticamente)
 on:
   push:
     branches: [main, homologacao]
@@ -89,13 +90,47 @@ jobs:
             echo "ready=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Configurar kubectl
+        if: steps.infra.outputs.ready == 'true'
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME"
+
+      # O Service vem ANTES do Terraform: o hostname do LoadBalancer é a upstream da
+      # rota https do webhook na API Gateway (criada pelo Terraform logo abaixo).
+      - name: Aplicar namespace e Services (LoadBalancer)
+        if: steps.infra.outputs.ready == 'true'
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/service.yaml
+          for i in $(seq 1 30); do
+            HOST=$(kubectl get svc billing-service-public -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+            [ -n "$HOST" ] && break
+            sleep 10
+          done
+          if [ -z "$HOST" ]; then
+            echo "::warning::LoadBalancer sem hostname após 5 min — rota do webhook não será criada nesta execução."
+          else
+            echo "LB_HOST=$HOST" >> "$GITHUB_ENV"
+          fi
+
+      - name: Descobrir a API Gateway (repositório serverless)
+        if: steps.infra.outputs.ready == 'true'
+        run: |
+          API_ID=$(aws apigatewayv2 get-apis --region "$AWS_REGION" \
+            --query "Items[?Name=='oficina-mecanica-${TARGET_ENV}-api'].ApiId | [0]" --output text)
+          if [ -z "$API_ID" ] || [ "$API_ID" = "None" ]; then
+            echo "::warning::API Gateway 'oficina-mecanica-${TARGET_ENV}-api' não encontrada — rode o pipeline do serverless para ter o webhook https. Seguindo sem a rota."
+            API_ID=""
+          fi
+          echo "API_GATEWAY_ID=$API_ID" >> "$GITHUB_ENV"
+
       - name: Setup Terraform
         if: steps.infra.outputs.ready == 'true'
         uses: hashicorp/setup-terraform@v4.0.1
         with:
           terraform_version: '~1.9'
+          terraform_wrapper: false
 
-      - name: Terraform apply — DynamoDB, fila SQS (+DLQ) e IAM do billing
+      - name: Terraform apply — DynamoDB, fila SQS (+DLQ), IAM e rota https do webhook
         if: steps.infra.outputs.ready == 'true'
         working-directory: terraform
         run: |
@@ -105,18 +140,22 @@ jobs:
             -backend-config="region=$AWS_REGION"
           terraform apply -input=false -auto-approve \
             -var="environment=$TARGET_ENV" \
-            -var="tf_state_bucket=${{ vars.TF_STATE_BUCKET }}"
+            -var="tf_state_bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -var="api_gateway_id=${API_GATEWAY_ID}" \
+            -var="webhook_upstream_url=${LB_HOST:+http://$LB_HOST}"
 
-      - name: Configurar kubectl
-        if: steps.infra.outputs.ready == 'true'
-        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME"
+          # URL pública: override manual > rota https criada agora > LoadBalancer http
+          PUBLIC_URL="${{ vars.BILLING_PUBLIC_URL }}"
+          [ -z "$PUBLIC_URL" ] && PUBLIC_URL=$(terraform output -raw public_base_url)
+          [ -z "$PUBLIC_URL" ] && [ -n "$LB_HOST" ] && PUBLIC_URL="http://$LB_HOST"
+          echo "PUBLIC_URL=$PUBLIC_URL" >> "$GITHUB_ENV"
+          echo "WEBHOOK_URL=$(terraform output -raw mercadopago_webhook_url)" >> "$GITHUB_ENV"
 
-      - name: Aplicar namespace, ConfigMap e Secret
+      - name: Aplicar ConfigMap e Secret
         if: steps.infra.outputs.ready == 'true'
         run: |
-          kubectl apply -f k8s/namespace.yaml
           GATEWAY=$([ -n "${{ secrets.MERCADOPAGO_ACCESS_TOKEN }}" ] && echo mercadopago || echo fake)
-          sed -i "s|QUEUE_PREFIX: \".*\"|QUEUE_PREFIX: \"$QUEUE_PREFIX\"|; s|PAYMENT_GATEWAY: \".*\"|PAYMENT_GATEWAY: \"$GATEWAY\"|; s|PUBLIC_BASE_URL: \".*\"|PUBLIC_BASE_URL: \"${{ vars.BILLING_PUBLIC_URL }}\"|" k8s/configmap.yaml
+          sed -i "s|QUEUE_PREFIX: \".*\"|QUEUE_PREFIX: \"$QUEUE_PREFIX\"|; s|PAYMENT_GATEWAY: \".*\"|PAYMENT_GATEWAY: \"$GATEWAY\"|; s|PUBLIC_BASE_URL: \".*\"|PUBLIC_BASE_URL: \"$PUBLIC_URL\"|" k8s/configmap.yaml
           kubectl apply -f k8s/configmap.yaml
           kubectl create secret generic billing-service-secrets \
             --namespace="$NAMESPACE" \
@@ -126,11 +165,14 @@ jobs:
             --from-literal=MERCADOPAGO_WEBHOOK_SECRET="${{ secrets.MERCADOPAGO_WEBHOOK_SECRET }}" \
             --dry-run=client -o yaml | kubectl apply -f -
 
-      - name: Aplicar Deployment, Services e HPA
+      # checksum da configuração no template do pod: se só a configuração mudou
+      # (ex.: PUBLIC_BASE_URL recém-descoberta), os pods são recriados mesmo assim.
+      - name: Aplicar Deployment e HPA
         if: steps.infra.outputs.ready == 'true'
         run: |
-          sed -i "s|arodri19/oficina-billing-service:[^ ]*|${{ needs.build-and-push.outputs.image }}|g" k8s/deployment.yaml
-          kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml -f k8s/hpa.yaml
+          CONFIG_HASH=$(cat k8s/configmap.yaml | sha256sum | cut -c1-16)
+          sed -i "s|arodri19/oficina-billing-service:[^ ]*|${{ needs.build-and-push.outputs.image }}|g; s|CONFIG_HASH|$CONFIG_HASH|" k8s/deployment.yaml
+          kubectl apply -f k8s/deployment.yaml -f k8s/hpa.yaml
           kubectl rollout status deployment/billing-service -n "$NAMESPACE" --timeout=300s
 
       - name: Smoke test (/health dentro do cluster)
@@ -150,5 +192,7 @@ jobs:
             echo "| Imagem | \`${{ needs.build-and-push.outputs.image }}\` |"
             echo "| Ambiente | \`$TARGET_ENV\` |"
             echo "| Cluster pronto | \`${{ steps.infra.outputs.ready }}\` |"
-            [ -n "$HOST" ] && echo "| Swagger | http://$HOST/api-docs |" && echo "| Webhook (LB) | http://$HOST/api/webhooks/mercadopago |"
+            [ -n "$HOST" ] && echo "| Swagger | http://$HOST/api-docs |"
+            [ -n "$PUBLIC_URL" ] && echo "| PUBLIC_BASE_URL | $PUBLIC_URL |"
+            [ -n "$WEBHOOK_URL" ] && echo "| Webhook Mercado Pago (https) | $WEBHOOK_URL |"
           } >> "$GITHUB_STEP_SUMMARY"

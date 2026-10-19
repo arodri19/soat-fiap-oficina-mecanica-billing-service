@@ -22,6 +22,9 @@ spec:
       labels:
         app: billing-service
         app.kubernetes.io/part-of: oficina-mecanica
+      annotations:
+        # Preenchido pelo CD com o hash do ConfigMap — mudança de configuração recria os pods
+        checksum/config: "CONFIG_HASH"
     spec:
       terminationGracePeriodSeconds: 30
       containers:
