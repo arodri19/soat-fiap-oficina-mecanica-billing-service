@@ -163,14 +163,17 @@ jobs:
             --from-literal=NEW_RELIC_LICENSE_KEY="${{ secrets.NEW_RELIC_LICENSE_KEY }}" \
             --from-literal=MERCADOPAGO_ACCESS_TOKEN="${{ secrets.MERCADOPAGO_ACCESS_TOKEN }}" \
             --from-literal=MERCADOPAGO_WEBHOOK_SECRET="${{ secrets.MERCADOPAGO_WEBHOOK_SECRET }}" \
-            --dry-run=client -o yaml | kubectl apply -f -
+            --dry-run=client -o yaml > "$RUNNER_TEMP/billing-secret.yaml"
+          kubectl apply -f "$RUNNER_TEMP/billing-secret.yaml"
 
-      # checksum da configuração no template do pod: se só a configuração mudou
-      # (ex.: PUBLIC_BASE_URL recém-descoberta), os pods são recriados mesmo assim.
+      # checksum de ConfigMap + Secret no template do pod: se só a configuração mudou
+      # (ex.: PUBLIC_BASE_URL recém-descoberta ou MERCADOPAGO_WEBHOOK_SECRET cadastrado
+      # depois), reexecutar o CD recria os pods mesmo com a mesma imagem. Só o hash vai
+      # para a anotação — nunca o valor dos segredos.
       - name: Aplicar Deployment e HPA
         if: steps.infra.outputs.ready == 'true'
         run: |
-          CONFIG_HASH=$(cat k8s/configmap.yaml | sha256sum | cut -c1-16)
+          CONFIG_HASH=$(cat k8s/configmap.yaml "$RUNNER_TEMP/billing-secret.yaml" | sha256sum | cut -c1-16)
           sed -i "s|arodri19/oficina-billing-service:[^ ]*|${{ needs.build-and-push.outputs.image }}|g; s|CONFIG_HASH|$CONFIG_HASH|" k8s/deployment.yaml
           kubectl apply -f k8s/deployment.yaml -f k8s/hpa.yaml
           kubectl rollout status deployment/billing-service -n "$NAMESPACE" --timeout=300s
