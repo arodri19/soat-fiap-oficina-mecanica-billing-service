@@ -69,7 +69,7 @@ Toda escrita envia `X-Idempotency-Key`. Erros 429/5xx/rede devolvem o comando à
 pelo SQS); 4xx viram resposta de falha para a saga. Pagamento aprovado de um orçamento já
 cancelado (link antigo pago após recusa/timeout) é **estornado automaticamente**.
 
-**Configuração**: `MERCADOPAGO_ACCESS_TOKEN` (credencial de teste `TEST-...` em Suas
+**Configuração**: `MERCADOPAGO_ACCESS_TOKEN` (token da seção **Credenciais de teste** em Suas
 integrações) liga o gateway real; sem ele o serviço usa o gateway **fake** e o pagamento é
 simulado em `POST /api/payments/order/:orderId/simulate` (`{"status":"approved"|"rejected"}`).
 `MERCADOPAGO_WEBHOOK_SECRET` (assinatura secreta do painel) é opcional: com ele, notificações
