@@ -1,0 +1,12 @@
+node_modules
+.env
+.env.*
+!.env.example
+tests/
+coverage/
+.git
+.github/
+k8s/
+terraform/
+docs/
+*.md

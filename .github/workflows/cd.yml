@@ -1,0 +1,197 @@
+name: CD — Deploy automatizado no Kubernetes (EKS)
+
+# Disparo 100% MANUAL (workflow_dispatch) — mesmo modelo dos repositórios de infra
+# (ADR 0007/0012): push e PR rodam só o CI; nenhum merge implanta nada sozinho.
+# Uma execução é o pipeline completo e automatizado: CI (testes, cobertura, Sonar)
+# → imagem no Docker Hub → Terraform do serviço → deploy no EKS → smoke test.
+# Em "Use workflow from" escolhe-se a branch a implantar. Se o cluster estiver
+# desligado, a imagem é publicada e o deploy é pulado com aviso.
+#
+# Secrets: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+#          JWT_SECRET, NEW_RELIC_LICENSE_KEY, MERCADOPAGO_ACCESS_TOKEN (opcional), SONAR_TOKEN
+# Variables (todas opcionais, com padrão): AWS_REGION, TF_STATE_BUCKET
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Ambiente alvo'
+        required: true
+        default: 'dev'
+        type: choice
+        options: [dev, staging, prod]
+
+concurrency:
+  group: cd-billing-service-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  TARGET_ENV: ${{ github.event.inputs.environment }}
+  DOCKERHUB_REPOSITORY: arodri19/oficina-billing-service
+  NAMESPACE: oficina-mecanica
+
+jobs:
+  ci:
+    name: CI (testes, cobertura, SonarQube)
+    uses: ./.github/workflows/ci.yml
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  build-and-push:
+    name: Build e push no Docker Hub
+    runs-on: ubuntu-latest
+    needs: ci
+    environment: oficina-prd
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: docker/login-action@v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Calcular tags
+        id: meta
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "image=${{ env.DOCKERHUB_REPOSITORY }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          echo "short=${{ env.DOCKERHUB_REPOSITORY }}:${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "branch=${{ env.DOCKERHUB_REPOSITORY }}:${GITHUB_REF_NAME//\//-}" >> "$GITHUB_OUTPUT"
+      - name: Build e push
+        run: |
+          docker build --tag "${{ steps.meta.outputs.image }}" --tag "${{ steps.meta.outputs.short }}" --tag "${{ steps.meta.outputs.branch }}" --tag "${{ env.DOCKERHUB_REPOSITORY }}:latest" .
+          docker push --all-tags "${{ env.DOCKERHUB_REPOSITORY }}"
+
+  deploy:
+    name: Deploy no EKS
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment: oficina-prd
+    env:
+      EKS_CLUSTER_NAME: oficina-mecanica-${{ github.event.inputs.environment }}
+      QUEUE_PREFIX: oficina-mecanica-${{ github.event.inputs.environment }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: aws-actions/configure-aws-credentials@v6.2.3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verificar se o cluster existe
+        id: infra
+        run: |
+          if aws eks describe-cluster --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Cluster '$EKS_CLUSTER_NAME' não existe (infra sob demanda desligada). Imagem publicada; deploy pulado."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configurar kubectl
+        if: steps.infra.outputs.ready == 'true'
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME"
+
+      # O Service vem ANTES do Terraform: o hostname do LoadBalancer é a upstream da
+      # rota https do webhook na API Gateway (criada pelo Terraform logo abaixo).
+      - name: Aplicar namespace e Services (LoadBalancer)
+        if: steps.infra.outputs.ready == 'true'
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/service.yaml
+          for i in $(seq 1 30); do
+            HOST=$(kubectl get svc billing-service-public -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+            [ -n "$HOST" ] && break
+            sleep 10
+          done
+          if [ -z "$HOST" ]; then
+            echo "::warning::LoadBalancer sem hostname após 5 min — rota do webhook não será criada nesta execução."
+          else
+            echo "LB_HOST=$HOST" >> "$GITHUB_ENV"
+          fi
+
+      - name: Descobrir a API Gateway (repositório serverless)
+        if: steps.infra.outputs.ready == 'true'
+        run: |
+          API_ID=$(aws apigatewayv2 get-apis --region "$AWS_REGION" \
+            --query "Items[?Name=='oficina-mecanica-${TARGET_ENV}-api'].ApiId | [0]" --output text)
+          if [ -z "$API_ID" ] || [ "$API_ID" = "None" ]; then
+            echo "::warning::API Gateway 'oficina-mecanica-${TARGET_ENV}-api' não encontrada — rode o pipeline do serverless para ter o webhook https. Seguindo sem a rota."
+            API_ID=""
+          fi
+          echo "API_GATEWAY_ID=$API_ID" >> "$GITHUB_ENV"
+
+      - name: Setup Terraform
+        if: steps.infra.outputs.ready == 'true'
+        uses: hashicorp/setup-terraform@v4.0.1
+        with:
+          terraform_version: '~1.9'
+          terraform_wrapper: false
+
+      - name: Terraform apply — DynamoDB, fila SQS (+DLQ), IAM e rota https do webhook
+        if: steps.infra.outputs.ready == 'true'
+        working-directory: terraform
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET || 'oficina-mecanica-terraform-state-769628268406' }}" \
+            -backend-config="key=oficina-mecanica/billing-service/${TARGET_ENV}/terraform.tfstate" \
+            -backend-config="region=$AWS_REGION"
+          terraform apply -input=false -auto-approve \
+            -var="environment=$TARGET_ENV" \
+            -var="tf_state_bucket=${{ vars.TF_STATE_BUCKET || 'oficina-mecanica-terraform-state-769628268406' }}" \
+            -var="api_gateway_id=${API_GATEWAY_ID}" \
+            -var="webhook_upstream_url=${LB_HOST:+http://$LB_HOST}"
+
+          # URL pública: rota https criada agora > LoadBalancer http
+          PUBLIC_URL=$(terraform output -raw public_base_url)
+          [ -z "$PUBLIC_URL" ] && [ -n "$LB_HOST" ] && PUBLIC_URL="http://$LB_HOST"
+          echo "PUBLIC_URL=$PUBLIC_URL" >> "$GITHUB_ENV"
+          echo "WEBHOOK_URL=$(terraform output -raw mercadopago_webhook_url)" >> "$GITHUB_ENV"
+
+      - name: Aplicar ConfigMap e Secret
+        if: steps.infra.outputs.ready == 'true'
+        run: |
+          GATEWAY=$([ -n "${{ secrets.MERCADOPAGO_ACCESS_TOKEN }}" ] && echo mercadopago || echo fake)
+          sed -i "s|QUEUE_PREFIX: \".*\"|QUEUE_PREFIX: \"$QUEUE_PREFIX\"|; s|PAYMENT_GATEWAY: \".*\"|PAYMENT_GATEWAY: \"$GATEWAY\"|; s|PUBLIC_BASE_URL: \".*\"|PUBLIC_BASE_URL: \"$PUBLIC_URL\"|" k8s/configmap.yaml
+          kubectl apply -f k8s/configmap.yaml
+          kubectl create secret generic billing-service-secrets \
+            --namespace="$NAMESPACE" \
+            --from-literal=JWT_SECRET="${{ secrets.JWT_SECRET }}" \
+            --from-literal=NEW_RELIC_LICENSE_KEY="${{ secrets.NEW_RELIC_LICENSE_KEY }}" \
+            --from-literal=MERCADOPAGO_ACCESS_TOKEN="${{ secrets.MERCADOPAGO_ACCESS_TOKEN }}" \
+            --dry-run=client -o yaml > "$RUNNER_TEMP/billing-secret.yaml"
+          kubectl apply -f "$RUNNER_TEMP/billing-secret.yaml"
+
+      # checksum de ConfigMap + Secret no template do pod: se só a configuração mudou
+      # (ex.: PUBLIC_BASE_URL recém-descoberta ou um secret trocado
+      # depois), reexecutar o CD recria os pods mesmo com a mesma imagem. Só o hash vai
+      # para a anotação — nunca o valor dos segredos.
+      - name: Aplicar Deployment e HPA
+        if: steps.infra.outputs.ready == 'true'
+        run: |
+          CONFIG_HASH=$(cat k8s/configmap.yaml "$RUNNER_TEMP/billing-secret.yaml" | sha256sum | cut -c1-16)
+          sed -i "s|arodri19/oficina-billing-service:[^ ]*|${{ env.DOCKERHUB_REPOSITORY }}:${{ github.sha }}|g; s|CONFIG_HASH|$CONFIG_HASH|" k8s/deployment.yaml
+          kubectl apply -f k8s/deployment.yaml -f k8s/hpa.yaml
+          kubectl rollout status deployment/billing-service -n "$NAMESPACE" --timeout=300s
+
+      - name: Smoke test (/health dentro do cluster)
+        if: steps.infra.outputs.ready == 'true'
+        run: |
+          kubectl run smoke-billing-${{ github.run_id }} -n "$NAMESPACE" --rm -i --restart=Never \
+            --image=curlimages/curl:8.10.1 -- -sf http://billing-service/health
+
+      - name: Resumo do deploy
+        if: always()
+        run: |
+          HOST=$(kubectl get svc billing-service-public -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+          {
+            echo "### Deploy billing-service — ${{ job.status }}"
+            echo "| Campo | Valor |"
+            echo "|---|---|"
+            echo "| Imagem | \`${{ env.DOCKERHUB_REPOSITORY }}:${{ github.sha }}\` |"
+            echo "| Ambiente | \`$TARGET_ENV\` |"
+            echo "| Cluster pronto | \`${{ steps.infra.outputs.ready }}\` |"
+            [ -n "$HOST" ] && echo "| Swagger | http://$HOST/api-docs |"
+            [ -n "$PUBLIC_URL" ] && echo "| PUBLIC_BASE_URL | $PUBLIC_URL |"
+            [ -n "$WEBHOOK_URL" ] && echo "| Webhook Mercado Pago (https) | $WEBHOOK_URL |"
+            true
+          } >> "$GITHUB_STEP_SUMMARY"
