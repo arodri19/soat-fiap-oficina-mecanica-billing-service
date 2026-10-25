@@ -1,0 +1,62 @@
+name: Destroy — remove o billing-service do cluster e a infra própria
+
+# Disparo manual. Rodar ANTES do destroy do infra-kube/infra-data:
+#  - apaga os Services do Kubernetes → a AWS remove o LoadBalancer (e o security
+#    group dele), que senão impediria apagar a VPC;
+#  - terraform destroy das filas/tabelas e DESANEXA a policy IAM do role dos nodes —
+#    com a policy anexada, a AWS recusa apagar o role no destroy do infra-kube.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Ambiente alvo'
+        required: true
+        default: 'dev'
+        type: choice
+        options: [dev, staging, prod]
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  TARGET_ENV: ${{ github.event.inputs.environment }}
+  NAMESPACE: oficina-mecanica
+
+jobs:
+  destroy:
+    name: Destroy billing-service (${{ github.event.inputs.environment }})
+    runs-on: ubuntu-latest
+    environment: oficina-prd
+    env:
+      EKS_CLUSTER_NAME: oficina-mecanica-${{ github.event.inputs.environment }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: aws-actions/configure-aws-credentials@v6.2.3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Remover recursos do Kubernetes (inclui o LoadBalancer)
+        run: |
+          if aws eks describe-cluster --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+            aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME"
+            kubectl delete -f k8s/hpa.yaml -f k8s/deployment.yaml -f k8s/service.yaml -f k8s/configmap.yaml --ignore-not-found --wait=true
+            kubectl delete secret billing-service-secrets -n "$NAMESPACE" --ignore-not-found
+          else
+            echo "::notice::Cluster não existe — nada a remover no Kubernetes."
+          fi
+
+      - uses: hashicorp/setup-terraform@v4.0.1
+        with:
+          terraform_version: '~1.9'
+
+      - name: Terraform destroy (filas, tabelas, policy IAM)
+        working-directory: terraform
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET || 'oficina-mecanica-terraform-state-769628268406' }}" \
+            -backend-config="key=oficina-mecanica/billing-service/${TARGET_ENV}/terraform.tfstate" \
+            -backend-config="region=$AWS_REGION"
+          terraform destroy -input=false -auto-approve \
+            -var="environment=$TARGET_ENV" \
+            -var="tf_state_bucket=${{ vars.TF_STATE_BUCKET || 'oficina-mecanica-terraform-state-769628268406' }}"

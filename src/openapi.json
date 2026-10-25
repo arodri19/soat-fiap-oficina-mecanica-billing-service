@@ -1,0 +1,560 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Billing Service — Oficina Mecânica (Fase 4)",
+    "version": "4.0.0",
+    "description": "Microsserviço de **Orçamento e Pagamento**. Participante da saga orquestrada pelo os-service: recebe comandos pela fila SQS `<prefixo>-billing-commands` (`CreateBudget`, `RequestPayment`, `CancelBudget`, `RefundPayment`) e responde na fila `<prefixo>-os-saga-replies`. Pagamentos via **Mercado Pago Checkout Pro** (https://www.mercadopago.com.br/developers/pt) — a confirmação chega pelo webhook e vira o evento `PaymentConfirmed` / `PaymentFailed` para a saga. Persistência em **DynamoDB**."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:4100/api"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Orçamentos"
+    },
+    {
+      "name": "Pagamentos"
+    },
+    {
+      "name": "Mercado Pago"
+    },
+    {
+      "name": "Interno (service-to-service)"
+    }
+  ],
+  "paths": {
+    "/budgets": {
+      "get": {
+        "tags": [
+          "Orçamentos"
+        ],
+        "summary": "Lista orçamentos (mais recentes primeiro)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "PENDING_APPROVAL",
+                "APPROVED",
+                "CANCELLED"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Orçamentos",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Budget"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/budgets/order/{orderId}": {
+      "get": {
+        "tags": [
+          "Orçamentos"
+        ],
+        "summary": "Orçamento de uma OS",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orderId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "example": 42
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Orçamento",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Budget"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Sem orçamento",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/payments/order/{orderId}": {
+      "get": {
+        "tags": [
+          "Pagamentos"
+        ],
+        "summary": "Cobranças de uma OS",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orderId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "example": 42
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cobranças",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Payment"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Sem cobrança",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/payments/order/{orderId}/simulate": {
+      "post": {
+        "tags": [
+          "Pagamentos"
+        ],
+        "summary": "Simula o pagamento (somente PAYMENT_GATEWAY=fake)",
+        "description": "Equivale ao cliente pagar (ou ter o cartão recusado) no checkout + notificação do Mercado Pago. Usado em ambiente local e na demo sem credenciais.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orderId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "example": 42
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "approved",
+                      "rejected"
+                    ],
+                    "default": "approved"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Resultado do processamento",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "outcome": {
+                      "type": "string",
+                      "enum": [
+                        "CONFIRMED",
+                        "FAILED",
+                        "AUTO_REFUNDED",
+                        "ALREADY_PROCESSED"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Sem cobrança pendente / gateway real",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/webhooks/mercadopago": {
+      "post": {
+        "tags": [
+          "Mercado Pago"
+        ],
+        "summary": "Webhook de notificações de pagamento do Mercado Pago",
+        "description": "Público, autenticado pela assinatura `x-signature` (HMAC-SHA256 de `id:<data.id>;request-id:<x-request-id>;ts:<ts>;` com a assinatura secreta). Consulta `GET /v1/payments/{id}` e: `approved` → `PaymentConfirmed`; `rejected`/`cancelled` → `PaymentFailed`. Pagamento aprovado de um orçamento já cancelado é **estornado automaticamente**.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "data.id",
+            "schema": {
+              "type": "string"
+            },
+            "example": "123456789"
+          },
+          {
+            "in": "query",
+            "name": "type",
+            "schema": {
+              "type": "string"
+            },
+            "example": "payment"
+          },
+          {
+            "in": "header",
+            "name": "x-signature",
+            "schema": {
+              "type": "string"
+            },
+            "example": "ts=1704908010,v1=618c85..."
+          },
+          {
+            "in": "header",
+            "name": "x-request-id",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "example": "payment"
+                  },
+                  "action": {
+                    "type": "string",
+                    "example": "payment.updated"
+                  },
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Recebido"
+          },
+          "401": {
+            "description": "Assinatura inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/orders/{orderId}/billing": {
+      "get": {
+        "tags": [
+          "Interno (service-to-service)"
+        ],
+        "summary": "Orçamento + pagamentos da OS (consumido pelo os-service via REST síncrono)",
+        "description": "Exige JWT `role: SERVICE`.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orderId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "example": 42
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Billing da OS",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "budget": {
+                      "$ref": "#/components/schemas/Budget"
+                    },
+                    "payment": {
+                      "$ref": "#/components/schemas/Payment"
+                    },
+                    "payments": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Payment"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Sem orçamento",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "BudgetItem": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "SERVICE",
+              "PART"
+            ]
+          },
+          "referenceId": {
+            "type": "integer"
+          },
+          "description": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "integer"
+          },
+          "unitPrice": {
+            "type": "number"
+          },
+          "total": {
+            "type": "number"
+          }
+        }
+      },
+      "Budget": {
+        "type": "object",
+        "properties": {
+          "budgetId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "orderId": {
+            "type": "integer"
+          },
+          "sagaId": {
+            "type": "string"
+          },
+          "externalId": {
+            "type": "string"
+          },
+          "customer": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "email": {
+                "type": "string"
+              }
+            }
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BudgetItem"
+            }
+          },
+          "total": {
+            "type": "number",
+            "example": 170.0
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PENDING_APPROVAL",
+              "APPROVED",
+              "CANCELLED"
+            ]
+          },
+          "cancelReason": {
+            "type": "string",
+            "nullable": true
+          },
+          "history": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "Payment": {
+        "type": "object",
+        "properties": {
+          "paymentId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "orderId": {
+            "type": "integer"
+          },
+          "budgetId": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "number"
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "MERCADO_PAGO",
+              "FAKE"
+            ]
+          },
+          "preferenceId": {
+            "type": "string"
+          },
+          "providerPaymentId": {
+            "type": "string",
+            "nullable": true
+          },
+          "checkoutUrl": {
+            "type": "string",
+            "example": "https://sandbox.mercadopago.com.br/checkout/v1/redirect?pref_id=123"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "APPROVED",
+              "REJECTED",
+              "CANCELLED",
+              "REFUNDED",
+              "REFUND_FAILED"
+            ]
+          },
+          "statusDetail": {
+            "type": "string",
+            "nullable": true
+          },
+          "history": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    }
+  }
+}

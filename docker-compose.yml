@@ -1,0 +1,38 @@
+# Ambiente local isolado do billing-service (LocalStack com SQS + DynamoDB).
+# Para o fluxo completo com os 3 microsserviços, use o docker-compose.yml do
+# repositório soat-fiap-oficina-mecanica-os-service.
+services:
+  localstack:
+    image: localstack/localstack:3.8
+    environment:
+      SERVICES: sqs,dynamodb
+      AWS_DEFAULT_REGION: us-east-1
+    ports:
+      - 4566:4566
+    volumes:
+      - ./local/init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "awslocal dynamodb describe-table --table-name oficina-mecanica-dev-billing"]
+      interval: 5s
+      retries: 30
+
+  billing-service:
+    build: .
+    depends_on:
+      localstack:
+        condition: service_healthy
+    ports:
+      - 4100:4100
+    environment:
+      PORT: 4100
+      JWT_SECRET: super-secret-change-me
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      SQS_ENDPOINT: http://localstack:4566
+      DYNAMODB_ENDPOINT: http://localstack:4566
+      NEW_RELIC_ENABLED: "false"
+      PAYMENT_GATEWAY: ${PAYMENT_GATEWAY:-fake}
+      MERCADOPAGO_ACCESS_TOKEN: ${MERCADOPAGO_ACCESS_TOKEN:-}
+      MERCADOPAGO_WEBHOOK_SECRET: ${MERCADOPAGO_WEBHOOK_SECRET:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:4100}
