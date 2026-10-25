@@ -43,6 +43,12 @@ class FakePaymentGateway {
     };
   }
 
+  // No gateway fake o "pagamento" só acontece pela rota /simulate (que já processa
+  // na hora) — não há nada para o polling descobrir.
+  async searchPaymentsByReference() {
+    return [];
+  }
+
   async refund(providerPaymentId) {
     if (this.refundShouldFail) {
       throw new PaymentGatewayError('Estorno recusado (simulado)', { status: 400 });

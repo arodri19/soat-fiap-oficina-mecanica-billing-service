@@ -61,7 +61,8 @@ Single-table design — tudo de uma OS na mesma partição, lido com uma Query:
 | Etapa | Chamada |
 |---|---|
 | Cliente aprova o orçamento | `POST /checkout/preferences` (itens do orçamento, `external_reference = "<orderId>:<paymentId>"`, `notification_url`) → `init_point` / `sandbox_init_point` |
-| Notificação | `POST /api/webhooks/mercadopago?data.id=...&type=payment` com `x-signature: ts=...,v1=...` validado por HMAC-SHA256 de `id:<data.id>;request-id:<x-request-id>;ts:<ts>;` |
+| Descobrir o pagamento — **polling** (padrão) | a cada `PAYMENT_POLL_INTERVAL_MS` (30s), `GET /v1/payments/search?external_reference=...` para cada cobrança `PENDING` — **não exige URL pública** |
+| Descobrir o pagamento — webhook (opcional) | `POST /api/webhooks/mercadopago?data.id=...&type=payment` com `x-signature: ts=...,v1=...` validado por HMAC-SHA256 de `id:<data.id>;request-id:<x-request-id>;ts:<ts>;` |
 | Verificação | `GET /v1/payments/{id}` — `approved` → `PaymentConfirmed`; `rejected`/`cancelled` → `PaymentFailed` |
 | Compensação | `POST /v1/payments/{id}/refunds` |
 
@@ -76,7 +77,15 @@ simulado em `POST /api/payments/order/:orderId/simulate` (`{"status":"approved"|
 sem `x-signature` válida são recusadas; sem ele, a proteção é a reconsulta obrigatória do
 pagamento na API do Mercado Pago (o corpo da notificação nunca é usado como verdade).
 
-**Webhook https automático na AWS**: o Mercado Pago só notifica URLs https e o billing roda
+**Por que polling + webhook**: o pagamento acontece no site do Mercado Pago, fora do nosso
+sistema e num momento que não controlamos — o billing precisa ser avisado (webhook) ou
+perguntar (polling). Como o ambiente do projeto não tem endereço fixo (infra sob demanda), o
+**polling** é o mecanismo principal: o billing é quem inicia a consulta, então funciona em
+qualquer lugar, inclusive localmente. O webhook é um complemento para reagir na hora quando
+houver URL https. Os dois usam o mesmo fluxo e são idempotentes — o segundo a chegar é
+ignorado (`ALREADY_PROCESSED`).
+
+**Webhook https automático na AWS (opcional)**: o Mercado Pago só notifica URLs https e o billing roda
 atrás de um LoadBalancer http. O CD resolve isso sozinho, numa única execução:
 
 1. aplica o Service e espera o hostname do LoadBalancer;
@@ -121,11 +130,11 @@ Fluxo completo com os três serviços: `docker compose up --build` no repositór
 ### Evidência de cobertura (mínimo 80% — o CI falha abaixo disso)
 
 ```
-Statements   : 99.32% ( 588/592 )
-Branches     : 96.88% ( 311/321 )
-Functions    : 99.22% ( 128/129 )
-Lines        : 99.62% ( 532/534 )
-Test Suites: 7 passed · Tests: 93 passed
+Statements   : 99.35%
+Branches     : 97.01%
+Functions    : 99.27%
+Lines        : 99.63%
+Test Suites: 7 passed · Tests: 99 passed
 ```
 
 ## CI/CD e infraestrutura

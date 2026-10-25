@@ -28,5 +28,8 @@ module.exports = {
   // Credenciais de teste usam o sandbox_init_point do Checkout Pro
   MERCADOPAGO_SANDBOX: process.env.MERCADOPAGO_SANDBOX !== 'false',
   // URL pública do billing (https) — vira notification_url das preferências
-  PUBLIC_BASE_URL: process.env.PUBLIC_BASE_URL || 'http://localhost:4100'
+  PUBLIC_BASE_URL: process.env.PUBLIC_BASE_URL || 'http://localhost:4100',
+  // Polling das cobranças pendentes no Mercado Pago (funciona sem URL pública).
+  // 0 desliga (ex.: se só o webhook for usado).
+  PAYMENT_POLL_INTERVAL_MS: Number.parseInt(process.env.PAYMENT_POLL_INTERVAL_MS ?? '30000', 10) || 0
 };

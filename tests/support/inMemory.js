@@ -56,6 +56,10 @@ class InMemoryBillingRepository {
     return { budget: await this.getBudget(orderId), payments: await this.listPayments(orderId) };
   }
 
+  async listPendingPayments() {
+    return [...this.payments.values()].filter((p) => p.status === 'PENDING').map((p) => new Payment(structuredClone(p)));
+  }
+
   async listBudgets({ status } = {}) {
     return [...this.budgets.values()].filter((b) => !status || b.status === status).map((b) => new Budget(structuredClone(b)));
   }

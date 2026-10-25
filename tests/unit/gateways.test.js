@@ -58,6 +58,20 @@ describe('MercadoPagoGateway', () => {
     expect(fetchImpl.mock.calls[0][1].body).toBeUndefined();
   });
 
+  it('busca pagamentos pela external_reference (polling)', async () => {
+    const fetchImpl = jest.fn().mockResolvedValue(json(200, { results: [
+      { id: 9, status: 'approved', status_detail: 'accredited', external_reference: '42:p', transaction_amount: 10 }
+    ] }));
+    const gateway = new MercadoPagoGateway({ accessToken: 't', fetchImpl });
+    await expect(gateway.searchPaymentsByReference('42:p')).resolves.toEqual([
+      { id: '9', status: 'approved', statusDetail: 'accredited', externalReference: '42:p', amount: 10 }
+    ]);
+    expect(fetchImpl.mock.calls[0][0]).toBe('https://api.mercadopago.com/v1/payments/search?external_reference=42%3Ap&sort=date_created&criteria=desc');
+    const empty = new MercadoPagoGateway({ accessToken: 't', fetchImpl: async () => json(200, {}) });
+    await expect(empty.searchPaymentsByReference('1:x')).resolves.toEqual([]);
+    await expect(new FakePaymentGateway().searchPaymentsByReference('1:x')).resolves.toEqual([]);
+  });
+
   it('estorna com X-Idempotency-Key', async () => {
     const fetchImpl = jest.fn().mockResolvedValue(json(201, { id: 9, status: 'approved' }));
     const gateway = new MercadoPagoGateway({ accessToken: 't', fetchImpl });

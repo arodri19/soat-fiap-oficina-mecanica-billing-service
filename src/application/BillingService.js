@@ -238,6 +238,32 @@ class BillingService {
     return { outcome: 'FAILED' };
   }
 
+  // ── Polling: reconcilia cobranças pendentes consultando o Mercado Pago ──────
+  // Alternativa ao webhook quando não há URL pública https (ambiente de estudo,
+  // infraestrutura que liga/desliga). O que encontrar segue o MESMO fluxo do
+  // webhook — se os dois existirem, o segundo a chegar vira ALREADY_PROCESSED.
+  async reconcilePendingPayments() {
+    const summary = { checked: 0, confirmed: 0, failed: 0, errors: 0 };
+    for (const payment of await this.repository.listPendingPayments()) {
+      summary.checked += 1;
+      try {
+        const reference = Payment.externalReference(payment.orderId, payment.paymentId);
+        const found = await this.gateway.searchPaymentsByReference(reference);
+        const decisive = found.find((p) => PROVIDER_APPROVED.includes(p.status))
+          || found.find((p) => PROVIDER_FAILED.includes(p.status));
+        if (!decisive) continue;
+
+        const { outcome } = await this.processPaymentNotification(decisive.id);
+        if (outcome === 'CONFIRMED' || outcome === 'AUTO_REFUNDED') summary.confirmed += 1;
+        if (outcome === 'FAILED') summary.failed += 1;
+      } catch (error) {
+        summary.errors += 1;
+        this.logger.warn({ err: error, orderId: payment.orderId, paymentId: payment.paymentId }, 'Falha ao reconciliar cobrança — nova tentativa no próximo ciclo');
+      }
+    }
+    return summary;
+  }
+
   // ── Consultas ───────────────────────────────────────────────────────────────
   async getOrderBilling(orderId) {
     const { budget, payments } = await this.repository.getOrderBilling(orderId);

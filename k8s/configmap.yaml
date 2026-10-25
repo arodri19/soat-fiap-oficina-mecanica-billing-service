@@ -16,5 +16,7 @@ data:
   # mercadopago com MERCADOPAGO_ACCESS_TOKEN no Secret; fake sem credenciais
   PAYMENT_GATEWAY: "mercadopago"
   MERCADOPAGO_SANDBOX: "true"
+  # Polling das cobranças pendentes no Mercado Pago (não exige URL pública). 0 = desliga
+  PAYMENT_POLL_INTERVAL_MS: "30000"
   # Preenchido pelo CD com o hostname público do LoadBalancer (notification_url)
   PUBLIC_BASE_URL: ""

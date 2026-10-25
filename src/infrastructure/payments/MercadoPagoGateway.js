@@ -18,6 +18,7 @@ class PaymentGatewayError extends Error {
  *
  * - Checkout Pro: POST /checkout/preferences → link de pagamento (init_point)
  * - Consulta do pagamento notificado: GET /v1/payments/{id}
+ * - Polling (sem URL pública): GET /v1/payments/search?external_reference=...
  * - Estorno (compensação da saga): POST /v1/payments/{id}/refunds
  * - Webhooks: assinatura HMAC-SHA256 no header x-signature ("ts=...,v1=...")
  *
@@ -102,6 +103,20 @@ class MercadoPagoGateway {
       externalReference: payment.external_reference,
       amount: payment.transaction_amount
     };
+  }
+
+  // Pagamentos já criados para uma cobrança (mais recente primeiro). Usado pelo
+  // polling — funciona sem nenhuma URL pública, ao contrário do webhook.
+  async searchPaymentsByReference(externalReference) {
+    const query = new URLSearchParams({ external_reference: externalReference, sort: 'date_created', criteria: 'desc' });
+    const { results = [] } = await this.#request('GET', `/v1/payments/search?${query}`);
+    return results.map((payment) => ({
+      id: String(payment.id),
+      status: payment.status,
+      statusDetail: payment.status_detail,
+      externalReference: payment.external_reference,
+      amount: payment.transaction_amount
+    }));
   }
 
   async refund(providerPaymentId, { idempotencyKey }) {

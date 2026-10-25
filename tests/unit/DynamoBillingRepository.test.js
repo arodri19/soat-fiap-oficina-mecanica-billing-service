@@ -93,6 +93,17 @@ describe('DynamoBillingRepository', () => {
     expect(await repoWith(async () => ({})).listBudgets()).toEqual([]);
   });
 
+  it('listPendingPayments consulta o GSI de pagamentos filtrando PENDING (mais recentes primeiro)', async () => {
+    const repo = repoWith(async () => ({ Items: [{ pk: 'ORDER#42', sk: 'PAYMENT#p', ...payment() }] }));
+    const pending = await repo.listPendingPayments();
+    expect(pending[0]).toBeInstanceOf(Payment);
+    expect(repo.client.send.mock.calls[0][0].input).toMatchObject({
+      IndexName: 'gsi1', FilterExpression: '#s = :pending', ScanIndexForward: false,
+      ExpressionAttributeValues: { ':type': 'PAYMENT', ':pending': 'PENDING' }
+    });
+    await expect(repoWith(async () => ({})).listPendingPayments()).resolves.toEqual([]);
+  });
+
   it('cria o DocumentClient real quando não injetado', () => {
     const repo = new DynamoBillingRepository({ tableName: 't', region: 'us-east-1', endpoint: 'http://localhost:4566' });
     expect(repo.client).toBeDefined();

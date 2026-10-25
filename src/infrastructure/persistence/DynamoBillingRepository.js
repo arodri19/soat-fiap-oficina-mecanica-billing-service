@@ -144,6 +144,23 @@ class DynamoBillingRepository {
     return (await this.getOrderBilling(orderId)).payments;
   }
 
+  // Cobranças ainda PENDING (polling do Mercado Pago) — GSI cronológico de pagamentos.
+  async listPendingPayments({ limit = 50 } = {}) {
+    const { Items = [] } = await this.client.send(new QueryCommand({
+      TableName: this.tableName,
+      IndexName: 'gsi1',
+      KeyConditionExpression: 'gsi1pk = :type',
+      FilterExpression: '#s = :pending',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeValues: { ':type': 'PAYMENT', ':pending': 'PENDING' },
+      // Limit é aplicado ANTES do filtro: lê as cobranças mais recentes (onde
+      // estão as pendentes); as antigas já expiram pelo timeout da saga.
+      ScanIndexForward: false,
+      Limit: limit
+    }));
+    return Items.map((item) => new Payment(DynamoBillingRepository.#strip(item)));
+  }
+
   async listBudgets({ status, limit = 50 } = {}) {
     const params = {
       TableName: this.tableName,

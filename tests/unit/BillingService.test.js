@@ -311,3 +311,60 @@ describe('Consultas e comandos desconhecidos', () => {
     expect(service.idGenerator()).toMatch(/^[0-9a-f-]{36}$/);
   });
 });
+
+describe('Polling do Mercado Pago (sem webhook)', () => {
+  async function pending(ctx) {
+    await createBudget(ctx);
+    await requestPayment(ctx);
+    return ctx.bus.last().payload.paymentId;
+  }
+
+  it('confirma cobrança aprovada encontrada pela external_reference', async () => {
+    const gateway = new FakePaymentGateway();
+    const ctx = setup({ gateway });
+    const paymentId = await pending(ctx);
+    const search = jest.spyOn(gateway, 'searchPaymentsByReference').mockImplementation(async () => [
+      { id: 'x', status: 'pending' },
+      { id: FakePaymentGateway.providerPaymentId({ status: 'approved', orderId: 42, paymentId }), status: 'approved' }
+    ]);
+
+    await expect(ctx.service.reconcilePendingPayments()).resolves.toEqual({ checked: 1, confirmed: 1, failed: 0, errors: 0 });
+    expect(search).toHaveBeenCalledWith(`42:${paymentId}`);
+    expect(ctx.bus.last()).toMatchObject({ type: 'PaymentConfirmed', payload: { paymentId } });
+
+    // próximo ciclo: nada mais pendente
+    await expect(ctx.service.reconcilePendingPayments()).resolves.toMatchObject({ checked: 0 });
+  });
+
+  it('recusa → PaymentFailed; sem pagamento ainda → aguarda', async () => {
+    const gateway = new FakePaymentGateway();
+    const ctx = setup({ gateway });
+    const paymentId = await pending(ctx);
+
+    await expect(ctx.service.reconcilePendingPayments()).resolves.toEqual({ checked: 1, confirmed: 0, failed: 0, errors: 0 });
+
+    gateway.searchPaymentsByReference = async () => [{ id: FakePaymentGateway.providerPaymentId({ status: 'rejected', orderId: 42, paymentId }), status: 'rejected' }];
+    await expect(ctx.service.reconcilePendingPayments()).resolves.toMatchObject({ failed: 1 });
+    expect(ctx.bus.last().type).toBe('PaymentFailed');
+  });
+
+  it('erro numa cobrança não interrompe o ciclo', async () => {
+    const gateway = new FakePaymentGateway();
+    const ctx = setup({ gateway });
+    await pending(ctx);
+    gateway.searchPaymentsByReference = async () => { throw new Error('MP fora'); };
+    await expect(ctx.service.reconcilePendingPayments()).resolves.toEqual({ checked: 1, confirmed: 0, failed: 0, errors: 1 });
+  });
+
+  it('pagamento aprovado de orçamento cancelado conta como estorno automático', async () => {
+    const gateway = new FakePaymentGateway();
+    const ctx = setup({ gateway });
+    const paymentId = await pending(ctx);
+    const budget = await ctx.repository.getBudget(42);
+    budget.cancel('timeout');
+    await ctx.repository.saveBudget(budget);
+    gateway.searchPaymentsByReference = async () => [{ id: FakePaymentGateway.providerPaymentId({ status: 'approved', orderId: 42, paymentId }), status: 'approved' }];
+    await expect(ctx.service.reconcilePendingPayments()).resolves.toMatchObject({ confirmed: 1 });
+    expect((await ctx.repository.getPayment(42, paymentId)).status).toBe('REFUNDED');
+  });
+});
