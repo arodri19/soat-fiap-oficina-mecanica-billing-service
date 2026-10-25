@@ -1,15 +1,16 @@
 name: CD — Deploy automatizado no Kubernetes (EKS)
 
-# Deploy AUTOMÁTICO a cada merge em homologacao/main (só via PR com CI verde).
-# Infra sob demanda (ADR 0007, Fase 3): sem cluster EKS de pé, publica a imagem e
-# pula o deploy com aviso.
+# Disparo 100% MANUAL (workflow_dispatch) — mesmo modelo dos repositórios de infra
+# (ADR 0007/0012): push e PR rodam só o CI; nenhum merge implanta nada sozinho.
+# Uma execução é o pipeline completo e automatizado: CI (testes, cobertura, Sonar)
+# → imagem no Docker Hub → Terraform do serviço → deploy no EKS → smoke test.
+# Em "Use workflow from" escolhe-se a branch a implantar. Se o cluster estiver
+# desligado, a imagem é publicada e o deploy é pulado com aviso.
 #
 # Secrets: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
 #          JWT_SECRET, NEW_RELIC_LICENSE_KEY, MERCADOPAGO_ACCESS_TOKEN (opcional), SONAR_TOKEN
-# Variables (todas opcionais, com padrão): AWS_REGION, TF_STATE_BUCKET, DEPLOY_ENVIRONMENT
+# Variables (todas opcionais, com padrão): AWS_REGION, TF_STATE_BUCKET
 on:
-  push:
-    branches: [main, homologacao]
   workflow_dispatch:
     inputs:
       environment:
@@ -25,7 +26,7 @@ concurrency:
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
-  TARGET_ENV: ${{ github.event.inputs.environment || vars.DEPLOY_ENVIRONMENT || 'dev' }}
+  TARGET_ENV: ${{ github.event.inputs.environment }}
   DOCKERHUB_REPOSITORY: arodri19/oficina-billing-service
   NAMESPACE: oficina-mecanica
 
@@ -65,8 +66,8 @@ jobs:
     needs: build-and-push
     environment: oficina-prd
     env:
-      EKS_CLUSTER_NAME: oficina-mecanica-${{ github.event.inputs.environment || vars.DEPLOY_ENVIRONMENT || 'dev' }}
-      QUEUE_PREFIX: oficina-mecanica-${{ github.event.inputs.environment || vars.DEPLOY_ENVIRONMENT || 'dev' }}
+      EKS_CLUSTER_NAME: oficina-mecanica-${{ github.event.inputs.environment }}
+      QUEUE_PREFIX: oficina-mecanica-${{ github.event.inputs.environment }}
     steps:
       - uses: actions/checkout@v7.0.1
 

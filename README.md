@@ -139,7 +139,7 @@ Test Suites: 7 passed · Tests: 99 passed
 ## CI/CD e infraestrutura
 
 - [`ci.yml`](.github/workflows/ci.yml): testes + cobertura ≥ 80% + **SonarQube Quality Gate** + build da imagem (PRs e branches de trabalho)
-- [`cd.yml`](.github/workflows/cd.yml): a cada merge em `homologacao`/`main` → CI → imagem no Docker Hub →
+- [`cd.yml`](.github/workflows/cd.yml): disparo manual (*Run workflow*, branch + ambiente) → CI → imagem no Docker Hub →
   Terraform (tabela DynamoDB, fila `*-billing-commands` + DLQ, IAM de menor privilégio, rota https do webhook na
   API Gateway) → deploy no EKS + smoke test
   (pulado com aviso se o cluster estiver desligado)
