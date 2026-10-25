@@ -5,11 +5,8 @@ name: CD — Deploy automatizado no Kubernetes (EKS)
 # pula o deploy com aviso.
 #
 # Secrets: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
-#          JWT_SECRET, NEW_RELIC_LICENSE_KEY, MERCADOPAGO_ACCESS_TOKEN,
-#          MERCADOPAGO_WEBHOOK_SECRET, SONAR_TOKEN
-# Variables: AWS_REGION, TF_STATE_BUCKET, DEPLOY_ENVIRONMENT
-#            BILLING_PUBLIC_URL (opcional — só para forçar outra URL pública; por padrão
-#            o CD cria a rota https na API Gateway e usa a URL dela automaticamente)
+#          JWT_SECRET, NEW_RELIC_LICENSE_KEY, MERCADOPAGO_ACCESS_TOKEN (opcional), SONAR_TOKEN
+# Variables (todas opcionais, com padrão): AWS_REGION, TF_STATE_BUCKET, DEPLOY_ENVIRONMENT
 on:
   push:
     branches: [main, homologacao]
@@ -135,18 +132,17 @@ jobs:
         working-directory: terraform
         run: |
           terraform init -input=false \
-            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET || 'oficina-mecanica-terraform-state-769628268406' }}" \
             -backend-config="key=oficina-mecanica/billing-service/${TARGET_ENV}/terraform.tfstate" \
             -backend-config="region=$AWS_REGION"
           terraform apply -input=false -auto-approve \
             -var="environment=$TARGET_ENV" \
-            -var="tf_state_bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -var="tf_state_bucket=${{ vars.TF_STATE_BUCKET || 'oficina-mecanica-terraform-state-769628268406' }}" \
             -var="api_gateway_id=${API_GATEWAY_ID}" \
             -var="webhook_upstream_url=${LB_HOST:+http://$LB_HOST}"
 
-          # URL pública: override manual > rota https criada agora > LoadBalancer http
-          PUBLIC_URL="${{ vars.BILLING_PUBLIC_URL }}"
-          [ -z "$PUBLIC_URL" ] && PUBLIC_URL=$(terraform output -raw public_base_url)
+          # URL pública: rota https criada agora > LoadBalancer http
+          PUBLIC_URL=$(terraform output -raw public_base_url)
           [ -z "$PUBLIC_URL" ] && [ -n "$LB_HOST" ] && PUBLIC_URL="http://$LB_HOST"
           echo "PUBLIC_URL=$PUBLIC_URL" >> "$GITHUB_ENV"
           echo "WEBHOOK_URL=$(terraform output -raw mercadopago_webhook_url)" >> "$GITHUB_ENV"
@@ -162,12 +158,11 @@ jobs:
             --from-literal=JWT_SECRET="${{ secrets.JWT_SECRET }}" \
             --from-literal=NEW_RELIC_LICENSE_KEY="${{ secrets.NEW_RELIC_LICENSE_KEY }}" \
             --from-literal=MERCADOPAGO_ACCESS_TOKEN="${{ secrets.MERCADOPAGO_ACCESS_TOKEN }}" \
-            --from-literal=MERCADOPAGO_WEBHOOK_SECRET="${{ secrets.MERCADOPAGO_WEBHOOK_SECRET }}" \
             --dry-run=client -o yaml > "$RUNNER_TEMP/billing-secret.yaml"
           kubectl apply -f "$RUNNER_TEMP/billing-secret.yaml"
 
       # checksum de ConfigMap + Secret no template do pod: se só a configuração mudou
-      # (ex.: PUBLIC_BASE_URL recém-descoberta ou MERCADOPAGO_WEBHOOK_SECRET cadastrado
+      # (ex.: PUBLIC_BASE_URL recém-descoberta ou um secret trocado
       # depois), reexecutar o CD recria os pods mesmo com a mesma imagem. Só o hash vai
       # para a anotação — nunca o valor dos segredos.
       - name: Aplicar Deployment e HPA

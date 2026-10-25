@@ -73,7 +73,7 @@ cancelado (link antigo pago após recusa/timeout) é **estornado automaticamente
 **Configuração**: `MERCADOPAGO_ACCESS_TOKEN` (token da seção **Credenciais de teste** em Suas
 integrações) liga o gateway real; sem ele o serviço usa o gateway **fake** e o pagamento é
 simulado em `POST /api/payments/order/:orderId/simulate` (`{"status":"approved"|"rejected"}`).
-`MERCADOPAGO_WEBHOOK_SECRET` (assinatura secreta do painel) é opcional: com ele, notificações
+`MERCADOPAGO_WEBHOOK_SECRET` (assinatura secreta do painel, só para uso local com túnel — o CD não o configura) é opcional: com ele, notificações
 sem `x-signature` válida são recusadas; sem ele, a proteção é a reconsulta obrigatória do
 pagamento na API do Mercado Pago (o corpo da notificação nunca é usado como verdade).
 
@@ -96,8 +96,7 @@ atrás de um LoadBalancer http. O CD resolve isso sozinho, numa única execuçã
    preferência — não é preciso cadastrar nada no painel do Mercado Pago.
 
 Se a API Gateway ainda não existir, o deploy segue com aviso (sem webhook https) e a rota é
-criada na próxima execução. `BILLING_PUBLIC_URL` (variable do GitHub) só serve para forçar
-outra URL.
+criada na próxima execução.
 
 ## API (Swagger em `/api-docs`)
 
