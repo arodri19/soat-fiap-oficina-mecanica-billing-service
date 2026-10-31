@@ -15,7 +15,10 @@ data:
   QUEUE_PREFIX: "oficina-mecanica-dev"
   # mercadopago com MERCADOPAGO_ACCESS_TOKEN no Secret; fake sem credenciais
   PAYMENT_GATEWAY: "mercadopago"
-  MERCADOPAGO_SANDBOX: "true"
+  # "false" = link normal (init_point). Com as credenciais do VENDEDOR DE TESTE
+  # (APP_USR-..., conta de teste) o pagamento só é registrado pelo init_point —
+  # pelo sandbox_init_point o checkout conclui mas nada chega à conta.
+  MERCADOPAGO_SANDBOX: "false"
   # Polling das cobranças pendentes no Mercado Pago (não exige URL pública). 0 = desliga
   PAYMENT_POLL_INTERVAL_MS: "30000"
   # Preenchido pelo CD com o hostname público do LoadBalancer (notification_url)
